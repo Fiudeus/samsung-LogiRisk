@@ -17,11 +17,10 @@ from sklearn.linear_model import LogisticRegression
 # -------------------------
 ROOT = Path(__file__).resolve().parents[1]
 DATASETS = ROOT / "datasets"
-OUT_DIR = ROOT / "stage_2" / "output"
+OUT_DIR = ROOT / "stage_1" / "output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ВАЖНО: зафиксируй реальную колонку месяца в driver_monthly_metrics.csv
-MONTH_COL = "month"  # <-- поменяй на правильную, если у вас иначе
+MONTH_COL = "month"
 
 
 @dataclass
@@ -334,3 +333,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# посмотреть другие модели, сделать модель с вероятностью, сделать сайт, объяснимый ии?
