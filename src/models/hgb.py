@@ -64,27 +64,33 @@ def main() -> None:
     X_test = safe_numeric_frame(test[feature_cols])
     y_test = test[target].astype(int).to_numpy()
 
-    # Class weights: приблизительный аналог scale_pos_weight
-    # sklearn HGB принимает class_weight начиная с некоторых версий;
-    # если не поддерживается — просто обучится без него.
+    # === ФИКС 1: Возвращаем NaN для HGB ===
+    if "months_since_last_incident" in X_train.columns:
+        X_train["months_since_last_incident"] = X_train["months_since_last_incident"].replace(999.0, np.nan)
+        X_test["months_since_last_incident"] = X_test["months_since_last_incident"].replace(999.0, np.nan)
+
+    if "months_in_company" in X_train.columns:
+        X_train["months_in_company"] = X_train["months_in_company"].replace(999.0, np.nan)
+        X_test["months_in_company"] = X_test["months_in_company"].replace(999.0, np.nan)
+
+    # === ФИКС 2: Гарантированный расчет весов для .fit() ===
     pos = int(y_train.sum())
     neg = int(len(y_train) - pos)
     spw = neg / max(1, pos)
+    sample_weights = np.where(y_train == 1, spw, 1.0)
 
-    class_weight = {0: 1.0, 1: float(spw)}
-
+    # === ФИКС 3: Экстремальная регуляризация ===
     model = HistGradientBoostingClassifier(
         loss="log_loss",
         learning_rate=0.05,
-        max_depth=6,
-        max_iter=600,
-        min_samples_leaf=20,
-        l2_regularization=0.0,
+        max_depth=2,  # СНИЖЕНО с 6: ограничиваем пнями (stumps)
+        max_iter=200,  # СНИЖЕНО с 600: отсекаем долгое зазубривание
+        min_samples_leaf=40,  # ПОВЫШЕНО с 20: узел создастся только если в нем 40+ примеров
+        l2_regularization=5.0,  # ПОВЫШЕНО с 0.0: жесткий штраф за разрастание весов
         random_state=42,
-        # early_stopping=True по умолчанию, но пусть будет явно:
         early_stopping=True,
         validation_fraction=0.1,
-        n_iter_no_change=50,
+        n_iter_no_change=20,
     )
 
     print("\n=== TRAIN ===")
@@ -92,21 +98,17 @@ def main() -> None:
         "HGB params:",
         {
             "learning_rate": 0.05,
-            "max_depth": 6,
-            "max_iter": 600,
-            "min_samples_leaf": 20,
+            "max_depth": 2,
+            "max_iter": 200,
+            "min_samples_leaf": 40,
+            "l2_regularization": 5.0,
             "early_stopping": True,
         },
     )
 
-    # Поддержка class_weight зависит от версии sklearn
-    try:
-        model.set_params(class_weight=class_weight)
-        print("Using class_weight:", class_weight)
-    except Exception:
-        print("class_weight is not supported in this sklearn version; training without it.")
-
-    model.fit(X_train, y_train)
+    # Передаем веса строго через sample_weight (работает в любой версии sklearn)
+    print(f"Using sample_weight with positive class weight = {spw:.2f}")
+    model.fit(X_train, y_train, sample_weight=sample_weights)
 
     scores = _get_scores(model, X_test)
 

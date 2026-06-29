@@ -3,6 +3,7 @@ from __future__ import annotations
 import warnings
 
 import pandas as pd
+import numpy as np
 
 from catboost import CatBoostClassifier
 
@@ -45,21 +46,25 @@ def main() -> None:
     X_test = safe_numeric_frame(test[feature_cols])
     y_test = test[target].astype(int).to_numpy()
 
-    # Балансировка как в XGB: scale_pos_weight = neg/pos
-    pos = int(y_train.sum())
-    neg = int(len(y_train) - pos)
-    spw = neg / max(1, pos)
+    # === ФИКС 1: Возвращаем NaN (CatBoost нативно строит для них сплиты) ===
+    if "months_since_last_incident" in X_train.columns:
+        X_train["months_since_last_incident"] = X_train["months_since_last_incident"].replace(999.0, np.nan)
+        X_test["months_since_last_incident"] = X_test["months_since_last_incident"].replace(999.0, np.nan)
+
+    if "months_in_company" in X_train.columns:
+        X_train["months_in_company"] = X_train["months_in_company"].replace(999.0, np.nan)
+        X_test["months_in_company"] = X_test["months_in_company"].replace(999.0, np.nan)
 
     model = CatBoostClassifier(
-        iterations=2000,
-        learning_rate=0.03,
-        depth=6,
-        l2_leaf_reg=3.0,
-        loss_function="Logloss",
-        eval_metric="AUC",
+        iterations=500,
+        learning_rate=0.001,
+        depth=3,
+        l2_leaf_reg=10.0,
+        # alpha=0.85 (вес аварий), gamma=2.0 (фокус на сложных случаях)
+        loss_function="Focal:focal_alpha=0.85;focal_gamma=2.0",
+        eval_metric="PRAUC",
         random_seed=42,
-        verbose=200,
-        scale_pos_weight=spw,
+        verbose=0,
         allow_writing_files=False,
     )
 
@@ -67,11 +72,12 @@ def main() -> None:
     print(
         "CatBoost params:",
         {
-            "iterations": 2000,
-            "learning_rate": 0.03,
-            "depth": 6,
-            "l2_leaf_reg": 3.0,
-            "scale_pos_weight": spw,
+            "iterations": 200,
+            "learning_rate": 0.05,
+            "depth": 3,
+            "l2_leaf_reg": 10.0,
+            "loss_function": "Focal:alpha=0.85;gamma=2.0",
+            "eval_metric": "PRAUC",
         },
     )
 

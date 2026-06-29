@@ -1,38 +1,45 @@
-import sys
-import os
 from pathlib import Path
 import pandas as pd
-import clickhouse_connect
+
+ROOT = Path(__file__).resolve().parents[1]
+# Сюда складываем глобальные персистентные данные (наш аналог диска ClickHouse)
+STORAGE_DIR = ROOT / "datasets" / "persistent_store"
+STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def ingest_new_csv(csv_path: str, target_table: str):
-    path = Path(csv_path)
-    if not path.exists():
-        print(f"[ОШИБКА] Файл не найден: {path}")
-        return
+def ingest_new_csv(uploaded_file, target_table: str) -> int:
+    """
+    Принимает файл из UI, валидирует схему, чистит даты
+    и инкрементально дописывает в персистентный Parquet-архив.
+    """
+    df_upload = pd.read_csv(uploaded_file)
 
-    ch_host = os.getenv('CLICKHOUSE_HOST', '127.0.0.1')
-    client = clickhouse_connect.get_client(host=ch_host, port=8123, username='admin', password='admin')
+    # Очистка пустых строк в driver_id
+    if "driver_id" in df_upload.columns:
+        df_upload = df_upload.dropna(subset=["driver_id"])
+        df_upload = df_upload[df_upload["driver_id"].astype(str).str.strip() != ""]
 
-    df = pd.read_csv(path)
+    if df_upload.empty:
+        raise ValueError("Пакет данных пуст или не содержит корректных driver_id.")
 
-    print(f"Обработка новой пачки для таблицы {target_table} ({len(df)} строк)...")
+    # Приведение дат к единому стандарту
+    for col in df_upload.columns:
+        if "date" in col.lower() or "time" in col.lower():
+            if df_upload[col].dtype != "bool" and not pd.api.types.is_bool_dtype(df_upload[col]):
+                df_upload[col] = pd.to_datetime(df_upload[col], errors="coerce").dt.strftime("%Y-%m-%d")
 
-    # Базовая предобработка дат в зависимости от таблицы
-    if 'date' in path.name or 'event' in path.name or 'incident' in path.name:
-        for col in df.columns:
-            if 'date' in col or 'datetime' in col:
-                df[col] = pd.to_datetime(df[col])
-                if target_table in ['trips', 'driver_monthly_metrics', 'drivers']:
-                    df[col] = df[col].dt.date
+    # Путь к постоянному файлу таблицы
+    parquet_target_path = STORAGE_DIR / f"{target_table}.parquet"
 
-    # Нативный инсерт в ClickHouse (данные просто добавятся в конец)
-    client.insert_df(f'default.{target_table}', df)
-    print(f"✓ Пачка успешно добавлена в ClickHouse default.{target_table}")
-
-
-if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Использование: python -m src.ingest_batch <путь_к_csv> <имя_таблицы>")
+    # Инкрементальное добавление (совмещение старого архива с новым пакетом)
+    if parquet_target_path.exists():
+        df_old = pd.read_parquet(parquet_target_path)
+        # Соединяем старую историю и новую пачку
+        df_final = pd.concat([df_old, df_upload], ignore_index=True).drop_duplicates()
     else:
-        ingest_new_csv(sys.argv[1], sys.argv[2])
+        df_final = df_upload
+
+    # Сохраняем на "жесткий диск" проекта
+    df_final.to_parquet(parquet_target_path, index=False, compression="snappy")
+
+    return len(df_upload)

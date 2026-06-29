@@ -3,8 +3,10 @@ from __future__ import annotations
 import warnings
 
 import pandas as pd
+import numpy as np
 
 from xgboost import XGBClassifier
+from sklearn.calibration import CalibratedClassifierCV
 
 from src.data import (
     ROOT,
@@ -52,27 +54,34 @@ def main() -> None:
     X_test = safe_numeric_frame(test[feature_cols])
     y_test = test[target].astype(int).to_numpy()
 
-    pos = int(y_train.sum())
-    neg = int(len(y_train) - pos)
-    spw = neg / max(1, pos)
+    # === ФИКС 1: Магия XGBoost с отсутствующими данными ===
+    # Значение 999 сводит бустинги с ума, они тратят сплиты на отделение 999 от 10.
+    # XGBoost из коробки гениально работает с NaN, сам вычисляя, куда их отправить
+    # (в безопасную ветку). Мы возвращаем NaN на место.
+    if "months_since_last_incident" in X_train.columns:
+        X_train["months_since_last_incident"] = X_train["months_since_last_incident"].replace(999.0, np.nan)
+        X_test["months_since_last_incident"] = X_test["months_since_last_incident"].replace(999.0, np.nan)
+
+    if "months_in_company" in X_train.columns:
+        X_train["months_in_company"] = X_train["months_in_company"].replace(999.0, np.nan)
+        X_test["months_in_company"] = X_test["months_in_company"].replace(999.0, np.nan)
 
     model = XGBClassifier(
-        n_estimators=1200,
-        learning_rate=0.03,
-        max_depth=5,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        reg_lambda=1.0,
-        min_child_weight=5,
-        gamma=0.0,
-        scale_pos_weight=spw,
+        n_estimators=500,  # Больше деревьев...
+        learning_rate=0.005,  # ...но учимся очень медленно
+        max_depth=2,
+        subsample=0.5,
+        colsample_bytree=0.5,
+        reg_lambda=20.0,
+        scale_pos_weight=1.0,
         eval_metric="aucpr",
         random_state=42,
         n_jobs=-1,
     )
 
     print("\n=== TRAIN ===")
-    print("XGB params:", {**model.get_params(), "scale_pos_weight": spw})
+    print("XGB params:", {**model.get_params()})
+
     model.fit(X_train, y_train)
 
     scores = model.predict_proba(X_test)[:, 1]

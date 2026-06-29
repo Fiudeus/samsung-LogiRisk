@@ -41,9 +41,9 @@ def main() -> None:
     print("Target rate (test) :", f"{test[target].mean():.2%}")
     print("n_features:", len(feature_cols))
 
-    X_train = safe_numeric_frame(train[feature_cols])
+    X_train = safe_numeric_frame(train[feature_cols]).fillna(0)
     y_train = train[target].astype(int).to_numpy()
-    X_test = safe_numeric_frame(test[feature_cols])
+    X_test = safe_numeric_frame(test[feature_cols]).fillna(0)
     y_test = test[target].astype(int).to_numpy()
 
     model = LogisticRegression(

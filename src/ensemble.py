@@ -9,8 +9,8 @@ OUTPUT_DIR = ROOT / "src" / "output"
 
 
 def load_predictions() -> dict[str, pd.DataFrame]:
-    """Загружает результаты работы 4 лучших моделей с учетом реальных имен колонок."""
-    models = ["xgb", "catboost", "hgb", "extratrees"]
+    """Загружает результаты работы моделей."""
+    models = ["logreg", "catboost", "xgb", "extratrees"]
     preds = {}
 
     for m in models:
@@ -27,113 +27,130 @@ def load_predictions() -> dict[str, pd.DataFrame]:
 
 def build_hybrid_ensemble(critical_threshold: float = 0.90) -> pd.DataFrame:
     """
-    Реализует Вариант Б:
-    Основа - средняя вероятность (Mean).
-    Алерты - если хотя бы одна модель выдала риск выше critical_threshold.
+    Реализует каскадный условный ансамбль (Tiered Cascade) на базе двух таблиц
+    с последующим нормированием индексов риска (Risk Banding) от 0 до 100.
     """
     preds = load_predictions()
     models = list(preds.keys())
 
-    base_df = preds[models[0]].copy()
-    for m in models[1:]:
+    # Собираем все предсказания в один датафрейм
+    base_df = preds["catboost"].copy()
+    for m in ["logreg", "xgb", "extratrees"]:
         base_df = base_df.merge(preds[m].drop(columns=["y_true"]), on=["driver_id", "month"], how="left")
 
     prob_cols = [f"prob_{m}" for m in models]
 
-    # 1. Средний скор (Mean) для базового ранжирования
-    base_df["ensemble_mean"] = base_df[prob_cols].mean(axis=1)
+    # 1. Расчет базового взвешенного скора для остального автопарка
+    weights = {"catboost": 0.50, "xgb": 0.35, "logreg": 0.12, "extratrees": 0.03}
+    base_df["weighted_score"] = (
+            base_df["prob_catboost"] * weights["catboost"] +
+            base_df["prob_xgb"] * weights["xgb"] +
+            base_df["prob_logreg"] * weights["logreg"] +
+            base_df["prob_extratrees"] * weights["extratrees"]
+    )
 
-    # 2. Максимальный скор (Max) для выявления критических ситуаций
-    base_df["ensemble_max"] = base_df[prob_cols].max(axis=1)
+    # 2. Строим жесткий каскад по рангу CatBoost внутри каждого месяца
+    base_df["catboost_rank"] = base_df.groupby("month")["prob_catboost"].rank(ascending=False, method="first")
 
-    # 3. Выставляем красные флаги (Critical Alerts)
-    base_df["has_critical_alert"] = (base_df["ensemble_max"] >= critical_threshold).astype(int)
+    # Глобальные экстремумы для честного MinMax-масштабирования второго яруса
+    global_max = base_df["weighted_score"].max()
+    global_min = base_df["weighted_score"].min()
+    safe_denom = (global_max - global_min) if (global_max - global_min) > 0 else 1.0
 
-    # Определяем источники алертов
+    # === РЕЛИЗ ИДЕИ: ДВЕ ТАБЛИЧКИ (STITCHING) ===
+
+    # Таблица А: Жесткий Топ-20 от CatBoost (Tier 1) -> Грейд A
+    t1_df = base_df[base_df["catboost_rank"] <= 20].copy()
+    t1_df["ensemble_tier"] = 1
+    t1_df["risk_grade"] = "A (Critical)"
+
+    # Масштабируем внутренний топ Кэтбуста в верхнюю половину монотонной шкалы [0.5, 1.0]
+    t1_max = t1_df["prob_catboost"].max() if not t1_df.empty else 1.0
+    t1_min = t1_df["prob_catboost"].min() if not t1_df.empty else 0.0
+    denom_t1 = (t1_max - t1_min) if (t1_max - t1_min) > 0 else 1.0
+    t1_df["ensemble_mean"] = 0.50 + ((t1_df["prob_catboost"] - t1_min) / denom_t1) * 0.50
+
+    # Таблица Б: Все остальные водители (Tier 2) -> Грейды B, C, D
+    t2_df = base_df[base_df["catboost_rank"] > 20].copy()
+    t2_df["ensemble_tier"] = 2
+    t2_df["risk_grade"] = "D (Low)"  # Значение по умолчанию
+
+    # Масштабируем взвешенный скор остатка в нижнюю половину монотонной шкалы [0.0, 0.499]
+    t2_df["ensemble_mean"] = ((t2_df["weighted_score"] - global_min) / safe_denom) * 0.499
+
+    # Динамическая нарезка грейдов внутри Tier 2 через процентили (Квантили)
+    if not t2_df.empty:
+        # Топ-5% риска из остатка получают Грейд B, следующие 15% — Грейд C, остальным оставляем D
+        quantiles = pd.qcut(
+            t2_df["ensemble_mean"],
+            q=[0, 0.80, 0.95, 1.0],
+            labels=["D (Low)", "C (Medium)", "B (High)"],
+            duplicates='drop'
+        )
+        t2_df["risk_grade"] = quantiles
+
+    # Склеиваем две таблицы обратно в единый консистентный датасет
+    final_df = pd.concat([t1_df, t2_df], ignore_index=True)
+
+    # Линейный перевод монотонного скора в стобалльный Индекс Риска для UI дашборда
+    final_df["display_score_100"] = (final_df["ensemble_mean"] * 100).round(1)
+
+    # 3. Алерты безопасности (вычисляются по сырым пикам моделей до сжатия)
+    final_df["ensemble_max"] = final_df[prob_cols].max(axis=1)
+    final_df["has_critical_alert"] = (final_df["ensemble_max"] >= critical_threshold).astype(int)
+
     def get_alert_sources(row):
         if not row["has_critical_alert"]:
             return ""
-        sources = [m for m in models if row[f"prob_{m}"] >= critical_threshold]
-        return ", ".join(sources)
+        return ", ".join([m for m in models if row[f"prob_{m}"] >= critical_threshold])
 
-    base_df["alert_source"] = base_df.apply(get_alert_sources, axis=1)
+    final_df["alert_source"] = final_df.apply(get_alert_sources, axis=1)
 
-    # 4. Двухуровневая сортировка: сначала алерты, затем по убыванию среднего риска
-    base_df = base_df.sort_values(
-        by=["has_critical_alert", "ensemble_mean"],
-        ascending=[False, False]
+    # Жесткая финальная сортировка: алерты -> ярус каскада -> итоговый балл -> стабильный ID
+    final_df = final_df.sort_values(
+        by=["has_critical_alert", "ensemble_tier", "ensemble_mean", "driver_id"],
+        ascending=[False, True, False, True]
     ).reset_index(drop=True)
 
-    return base_df
+    return final_df
 
 
 def main():
-    # Настройка парсера аргументов командной строки
-    parser = argparse.ArgumentParser(
-        description="Гибридный ансамбль (Вариант Б) для ранжирования риска инцидентов водителей."
-    )
-    parser.add_argument(
-        "--threshold", "-t",
-        type=float,
-        default=0.90,
-        help="Критический порог для индивидуальных моделей (по умолчанию: 0.90)"
-    )
-    parser.add_argument(
-        "--top-k", "-k",
-        type=int,
-        default=10,
-        help="Количество выводимых строк в консоль. Передайте -1 для вывода всего топа (по умолчанию: 10)"
-    )
-    parser.add_argument(
-        "--month", "-m",
-        type=str,
-        default=None,
-        help="Фильтрация по конкретному месяцу срезa (например, '2024-09-01'). Если не указан, выводится всё время."
-    )
+    parser = argparse.ArgumentParser(description="Каскадный условный ансамбль LogiRisk.")
+    parser.add_argument("--threshold", "-t", type=float, default=0.90)
+    parser.add_argument("--top-k", "-k", type=int, default=15)
+    parser.add_argument("--month", "-m", type=str, default=None)
 
     args = parser.parse_args()
+    print("=== HYBRID ENSEMBLE BLENDING (CASCADE TIERED MODE) ===")
 
-    print("=== HYBRID ENSEMBLE BLENDING (CLI MODE) ===")
-
-    # 1. Строим ансамбль
     final_df = build_hybrid_ensemble(critical_threshold=args.threshold)
 
-    # Сохраняем полный датасет (бизнес-логика требует сохранять всё без обрезки)
     out_path = OUTPUT_DIR / "hybrid_ensemble_scored.csv"
     final_df.to_csv(out_path, index=False)
-    print(f"✓ Полный ансамбль сохранен в: {out_path}")
+    print(f"✓ Каскадный ансамбль сохранен в: {out_path}")
 
-    # 2. Фильтрация по месяцу, если аргумент передан
     if args.month:
-        # Приводим к строковому формату для надежного сравнения, если в df тип object/string
         final_df["month_str"] = final_df["month"].astype(str)
-        # Поддерживаем форматы ГГГГ-ММ-ДД и ГГГГ-ММ
         filtered_df = final_df[final_df["month_str"].str.startswith(args.month)].copy()
         filtered_df = filtered_df.drop(columns=["month_str"])
-
         if filtered_df.empty:
-            print(f"⚠ Внимание: Данные за месяц '{args.month}' не найдены в датасете.")
+            print(f"⚠ Данные за месяц '{args.month}' не найдены.")
             return
-        print(f"✓ Применен фильтр по месяцу: {args.month}")
+        print(f"✓ Фильтр по месяцу: {args.month}")
     else:
         filtered_df = final_df
 
-    # 3. Определение размера вывода (Top-K или Всё)
     if args.top_k == -1:
-        print(f"\nВывод полного рейтинга (всего строк: {len(filtered_df)}):")
         display_df = filtered_df
     else:
         k = min(args.top_k, len(filtered_df))
-        print(f"\nВывод ТОП-{k} водителей на проверку:")
+        print(f"\nВывод ТОП-{k} водителей повышенного риска:")
         display_df = filtered_df.head(k)
 
-    # Печать результатов в консоль
-    cols_to_show = ["driver_id", "month", "has_critical_alert", "alert_source", "ensemble_mean", "y_true"]
+    # Выводим в консоль красивую бизнес-таблицу
+    cols_to_show = ["driver_id", "month", "risk_grade", "display_score_100", "has_critical_alert", "y_true"]
     print(display_df[cols_to_show].to_string(index=False))
-
-    # Вывод краткой сводки по алертам
-    total_alerts = filtered_df["has_critical_alert"].sum()
-    print(f"\n[Статистика]: Всего критических алертов в выбранном срезе (риск >= {args.threshold}): {total_alerts}")
 
 
 if __name__ == "__main__":

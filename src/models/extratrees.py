@@ -47,12 +47,14 @@ def main() -> None:
 
     model = ExtraTreesClassifier(
         n_estimators=1500,
-        max_depth=None,
+        max_depth=12,  # УВЕЛИЧЕНО: бэггингу нужны глубокие деревья для поиска сигнала
         min_samples_leaf=5,
         min_samples_split=10,
-        max_features="sqrt",
+        max_features=0.7,
+        # ИЗМЕНЕНО с "sqrt": разрешаем видеть 70% фичей при каждом сплите, чтобы не упускать важные паттерны
         bootstrap=False,
-        class_weight="balanced",
+        # ОТКЛЮЧЕНО: ExtraTrees нативно снижает дисперсию за счет случайных порогов, бутстрап здесь только "мылит" редкие аварии
+        class_weight=None,  # ОТКЛЮЧЕНО: возвращаем чистые, некалиброванные вероятности для идеального ранжирования (AP)
         random_state=42,
         n_jobs=-1,
     )
@@ -62,10 +64,11 @@ def main() -> None:
         "ExtraTrees params:",
         {
             "n_estimators": 1500,
+            "max_depth": 12,
             "min_samples_leaf": 5,
-            "min_samples_split": 10,
-            "max_features": "sqrt",
-            "class_weight": "balanced",
+            "max_features": 0.7,
+            "bootstrap": False,
+            "class_weight": None,
         },
     )
 

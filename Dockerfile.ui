@@ -1,0 +1,17 @@
+# Берем чистый и легкий Python, без всякого тяжелого Airflow
+FROM python:3.11-slim
+
+# Рабочая директория
+WORKDIR /opt/airflow
+
+# Копируем зависимости
+COPY requirements.txt .
+
+# Ставим библиотеки (тут установятся pandas, streamlit, psycopg2 и тд)
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Открываем порт для Streamlit
+EXPOSE 8501
+
+# Запускаем интерфейс (без всяких костылей с entrypoint)
+CMD ["streamlit", "run", "src/interface.py", "--server.port=8501", "--server.address=0.0.0.0"]

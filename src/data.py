@@ -4,12 +4,8 @@ from pathlib import Path
 from typing import Sequence
 import numpy as np
 import pandas as pd
-import clickhouse_connect
-import os
-
 
 ROOT = Path(__file__).resolve().parents[1]
-DATASETS = ROOT / "datasets"
 
 
 @dataclass(frozen=True)
@@ -20,16 +16,11 @@ class DatasetConfig:
 
 
 def safe_numeric_frame(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy().replace([np.inf, -np.inf], np.nan).fillna(0)
+    df = df.copy().replace([np.inf, -np.inf], np.nan)
     for c in df.columns:
         if not pd.api.types.is_numeric_dtype(df[c]):
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+            df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
-
-
-def to_month_start(dt: pd.Series) -> pd.Series:
-    dt = pd.to_datetime(dt, errors="coerce")
-    return dt.dt.to_period("M").dt.to_timestamp()
 
 
 def train_test_split_by_time(df: pd.DataFrame, test_months: int = 6):
@@ -42,28 +33,27 @@ def train_test_split_by_time(df: pd.DataFrame, test_months: int = 6):
     return train, test, test_start
 
 
-
 def build_panel(cfg: DatasetConfig = DatasetConfig()) -> tuple[pd.DataFrame, list[str], str]:
-    print("Запрашиваем готовую витрину из ClickHouse...")
+    print("Загружаем готовую Spark-матрицу из Parquet...")
+    parquet_path = ROOT / "src" / "output" / "spark_features.parquet"
 
-    ch_host = os.getenv('CLICKHOUSE_HOST', '127.0.0.1')
-    client = clickhouse_connect.get_client(host=ch_host, port=8123, username='admin', password='admin')
+    if not parquet_path.exists():
+        raise FileNotFoundError(
+            f"Spark-матрица фичей не обнаружена по пути {parquet_path}. Сначала запустите src.spark_features.")
 
-    panel = client.query_df("SELECT * FROM default.driver_features_view")
-
-    # 2. Приводим типы
+    panel = pd.read_parquet(parquet_path)
     panel['month'] = pd.to_datetime(panel['month'])
 
-    # 3. Обрезаем горизонт предсказания (убираем последние 3 месяца, где мы еще не знаем будущее)
-    max_month = panel["month"].max()
-    panel = panel[panel["month"] <= (max_month - pd.offsets.MonthBegin(cfg.horizon_months))].copy()
-
     target = "has_incident_next_3m"
-
-    exclude = {"driver_id", "month", target, "trips_cnt", "incidents_cnt"}
+    # Исключаем служебные поля, идентификаторы и прямые лики
+    exclude = {"driver_id", "month", target, "trips_cnt", "incidents_cnt", "month_idx", "incident_marker",
+               "last_incident_month_idx"}
     feature_cols = [c for c in panel.columns if c not in exclude]
 
-    panel[feature_cols] = panel[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0)
+    # Строгая типизация
+    for c in feature_cols:
+        if any(tp in str(panel[c].dtype).lower() for tp in ['uint', 'int']):
+            panel[c] = panel[c].astype('float64')
 
-    print(f"Матрица получена: {panel.shape[0]} строк, {len(feature_cols)} фичей.")
+    print(f"Матрица успешно собрана: {panel.shape[0]} строк, {len(feature_cols)} фичей.")
     return panel, feature_cols, target

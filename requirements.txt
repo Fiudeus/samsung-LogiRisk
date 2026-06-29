@@ -3,4 +3,8 @@ pandas
 scikit-learn
 xgboost
 catboost
-clickhouse-connect
+pyspark==3.5.1
+psycopg2-binary
+sqlalchemy
+pyarrow
+streamlit
