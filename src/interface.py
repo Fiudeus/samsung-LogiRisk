@@ -17,7 +17,7 @@ except ImportError:
 
 # ========== НАСТРОЙКИ СТРАНИЦЫ ==========
 st.set_page_config(
-    page_title="LogiRisk | Оценка риска",
+    page_title="LogiRisk",
     layout="wide"
 )
 
@@ -152,7 +152,7 @@ with col3:
 
 st.markdown("---")
 
-tab1, tab2, tab3 = st.tabs(["📊 Рейтинг рисков", "🛡️ Панель корректировок", "📁 Загрузка логов (Data Lake)"])
+tab1, tab2, tab3 = st.tabs(["Рейтинг рисков", "Панель корректировок", "Загрузка логов (Data Lake)"])
 
 # ----- ВКЛАДКА 1: ОСНОВНОЙ РЕЙТИНГ -----
 with tab1:
@@ -256,6 +256,7 @@ with tab3:
         if st.button("🚀 Отправить в Data Lake", type="primary"):
             with st.spinner("Склеиваем историю и обновляем Parquet-архив..."):
                 try:
+                    uploaded_file.seek(0)
                     rows = ingest_new_csv(uploaded_file, target_table)
                     st.success(f"Успешно! {rows} строк сжато и добавлено в {target_table}.parquet!")
                     st.info("Данные на диске. Теперь Airflow может запускать Spark ETL без перегрузки памяти.")

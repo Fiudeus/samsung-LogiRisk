@@ -172,10 +172,11 @@ def main():
         .withColumn("has_incident_next_3m", F.when(F.col("future_incidents_sum") > 0, 1.0).otherwise(0.0)) \
         .drop("future_incidents_sum")
 
-    # Фильтрация краев
-    max_month_row = panel.select(F.max("month").alias("max_m")).collect()
-    max_month = max_month_row[0]["max_m"]
-    panel = panel.filter(F.col("month") <= F.add_months(F.lit(max_month), -3))
+    # Фильтрация краев. ИСПОЛЬЗУЕТСЯ ПРИ ОБУЧЕНИИ И ПРАВИЛЬНОМ РАССЧЁТЕ МЕТРИК,
+    # УДАЛЕНО ИЗ ФИНАЛЬНОЙ ВЕРСИИ ДЛЯ ПРАВИЛЬНОЙ РАБОТЫ ЗАГРУЗКИ НОВЫХ ДАННЫХ
+    # max_month_row = panel.select(F.max("month").alias("max_m")).collect()
+    # max_month = max_month_row[0]["max_m"]
+    # panel = panel.filter(F.col("month") <= F.add_months(F.lit(max_month), -3))
 
     # 7. Сохранение
     output_path = f"{output_dir}/spark_features.parquet"
